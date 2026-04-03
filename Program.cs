@@ -1,5 +1,7 @@
 using System;
 using System.Windows.Forms;
+using SecureBrowser.Data;
+using SecureBrowser.Forms;
 
 namespace SecureBrowser
 {
@@ -8,7 +10,6 @@ namespace SecureBrowser
         [STAThread]
         static void Main()
         {
-            // Show crash details instead of silent exits
             Application.ThreadException += (s, e) =>
                 MessageBox.Show("Error:\n\n" + e.Exception.Message +
                     "\n\n" + e.Exception.StackTrace,
@@ -23,26 +24,48 @@ namespace SecureBrowser
             Application.SetCompatibleTextRenderingDefault(false);
             Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
 
-            // Initialise default users and policy on first run
-            PolicyEngine.EnsureDefaultData();
+            // ── Verify database connection ─────────────────────────────────
+            if (!Db.TestConnection(out var dbError))
+            {
+                var result = MessageBox.Show(
+                    "Cannot connect to the PostgreSQL database.\n\n" +
+                    "Make sure Docker is running and the container is up:\n" +
+                    "  docker-compose up -d\n\n" +
+                    $"Error: {dbError}\n\n" +
+                    "Retry?",
+                    "Database Connection Failed",
+                    MessageBoxButtons.RetryCancel, MessageBoxIcon.Warning);
+
+                if (result == DialogResult.Cancel) return;
+
+                // One retry
+                if (!Db.TestConnection(out dbError))
+                {
+                    MessageBox.Show(
+                        "Still cannot connect.\n\n" +
+                        "Please run 'docker-compose up -d' in the project folder\n" +
+                        "and wait a few seconds for PostgreSQL to start.\n\n" +
+                        $"Error: {dbError}",
+                        "Database Unavailable", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    return;
+                }
+            }
 
             // ── Login → Browser → Logout → Login loop ─────────────────────
-            // Allows switching users without restarting the app (great for demo)
             while (true)
             {
                 var loginForm = new LoginForm();
                 if (loginForm.ShowDialog() != DialogResult.OK)
-                    break;  // User closed login form — exit
+                    break;
 
-                var session   = loginForm.CurrentSession;
+                var session = loginForm.CurrentSession;
                 if (session == null) break;
 
-                var mainForm  = new MainForm(session);
+                var mainForm = new MainForm(session);
                 Application.Run(mainForm);
 
-                // If the user clicked "Logout", loop back to login screen
                 if (!mainForm.ShouldLogout)
-                    break;  // Window was closed normally — exit app
+                    break;
             }
         }
     }

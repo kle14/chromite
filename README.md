@@ -1,334 +1,303 @@
-# 🛡️ Secure Browser — Enterprise Data Protection Demo
+# Secure Browser v2.0
 
-> A proof-of-concept secure browser built in C# / WinForms + WebView2, demonstrating OS-level data exfiltration prevention, identity-aware policy enforcement, centralised audit logging, and an admin console — running entirely on a local Windows machine.
+**Enterprise Data Protection Browser Demo** — a C# WinForms application built on Microsoft WebView2 that enforces per-user security policies (URL whitelisting, clipboard control, print control, screenshot protection, save-page blocking) entirely from a live PostgreSQL database. Admin policy changes take effect **immediately** — no logout or restart required.
+
+Built as a prototype to demonstrate what an enterprise-controlled browser layer looks like in practice: not just a locked-down browser, but a fully audited, policy-driven access control surface with a real-time admin console.
 
 ---
 
-## What This Is
+## Prerequisites
 
-This is a **leadership demo** prototype that shows what a production-grade secure browser platform would look like in practice. It is not a Chromium fork or an enterprise deployment — it is a working demonstration of the architectural concepts described in the full requirements, built to run on a single Windows laptop with no external dependencies.
-
-Every feature maps directly to a real enterprise requirement. The goal is to show that the concepts work, that the controls are real, and that the system can be extended into a full production platform with appropriate engineering investment.
+| Requirement | Version | Notes |
+|---|---|---|
+| Windows | 10 v2004+ / 11 recommended | WinForms + WebView2 requires Windows |
+| .NET SDK | 8.0 | https://dotnet.microsoft.com/download/dotnet/8.0 |
+| Docker Desktop | Latest | https://www.docker.com/products/docker-desktop/ |
+| WebView2 Runtime | Any | Pre-installed with Edge on most systems |
 
 ---
 
 ## Quick Start
 
-### Prerequisites
-- Windows 10 version 2004 or later (Windows 11 recommended)
-- [.NET 8 SDK (x64)](https://dotnet.microsoft.com/download/dotnet/8.0)
-- WebView2 Runtime — already installed on most Windows 11 machines via Microsoft Edge. If missing, download the [Evergreen Bootstrapper](https://developer.microsoft.com/microsoft-edge/webview2/)
-
-### Run
-
-```powershell
-cd SecureBrowserDemo
-dotnet restore SecureBrowser.csproj
-dotnet run --project SecureBrowser.csproj -c Release
+```
+1.  Open PowerShell in this folder
+2.  docker-compose up -d          ← starts PostgreSQL on port 5433
+3.  Wait ~5 seconds for DB init
+4.  dotnet run -c Release         ← builds and launches
 ```
 
-### Demo Credentials
+Or double-click **`setup.bat`** — it runs all three steps automatically.
 
-| Username | Password   | Role  | Clipboard | Print | Allowed Locations  |
-|----------|------------|-------|-----------|-------|--------------------|
-| admin    | Admin123!  | Admin | Yes       | Yes   | Office, Remote, Branch |
-| alice    | Alice123!  | User  | No        | No    | Office only        |
-| bob      | Bob123!    | User  | Yes       | No    | Office, Remote     |
+For subsequent launches, use **`run.bat`** or `dotnet run -c Release`.
 
 ---
 
-## Feature Map — Requirements vs. What Was Built
+## Demo Credentials
 
-### 1. Identity & Authentication
-**Requirement:** PKI / PingFederate authentication with user attributes driving policy.
-
-**What was built:**
-- Login screen with username, password, and location selector
-- SHA-256 password hashing stored in `data/users.json`
-- Session object carries identity, role, permissions, and location through the entire browser lifecycle
-- Login → Browser → Logout → Login loop so multiple users can be demonstrated without restarting the app
-- Failed login attempts are logged to the audit trail with timestamp and severity
-
-> In production this login screen is replaced by a PingFederate OIDC redirect. The session object would be populated from the SAML assertion attributes rather than a local JSON file. The rest of the system is unchanged.
+| User  | Password  | Role | Access Level |
+|-------|-----------|------|---|
+| admin | Admin123! | Admin | Full access, clipboard, print, all URLs, all locations, Admin Console |
+| alice | Alice123! | User | No clipboard, no print, SSL-only, Office location only, google.com + github.com |
+| bob   | Bob123!   | User | Clipboard allowed, no print, SSL-only, Office + Remote, google.com + microsoft.com + stackoverflow.com |
 
 ---
 
-### 2. Per-User Permissions (Policy Engine)
-**Requirement:** Centralised configuration for per-user, per-application controls. Some users have clipboard, some have print, some have neither.
+## Demo Flow (10 minutes)
 
-**What was built:**
-- `PolicyEngine.cs` loads and evaluates permissions from `data/policy.json`
-- Per-user controls: clipboard access, print access, SSL-only mode
-- Permissions are evaluated at session start and enforced throughout the browser session
-- Status bar shows the active permission set for the current user at all times
-- Admin can change permissions live via the Admin Console; changes take effect on next login
+**Step 1** — Login as `alice / Alice123!` from Office
+- Status bar shows live permission state: `📋 Clipboard: ✗ Blocked   🖨 Print: ✗ Blocked   🔒 SSL-Only: On`
+- Navigate to `reddit.com` → blocked by URL whitelist, logged to audit
+- Try `http://google.com` → blocked by SSL-only policy, logged
+- Press Ctrl+C → blocked at JS layer, logged; try to copy via context menu → copy item is removed
+- Press Ctrl+P → blocked at JS layer, logged; try to print via context menu → print item is removed
+- Press Print Screen → window content appears solid black in capture
+- Press Ctrl+S → blocked at OS hook + JS layer, logged
 
-**Demo:**
-- Login as `alice` — clipboard is blocked, status bar shows `Clipboard: ✗ Blocked`
-- Login as `bob` — clipboard is allowed, status bar shows `Clipboard: ✓ Allowed`
-- Admin changes alice's clipboard permission → alice logs back in → clipboard now works
+**Step 2** — Logout → Login as `alice` from **Remote** → denied (location not permitted), logged as `LOCATION_DENIED`
 
-> In production `policy.json` is replaced by a REST API call to a centralised policy service backed by a database. The `PolicyEngine` class is the abstraction layer — only the data source changes.
+**Step 3** — Login as `admin / Admin123!`
+- Click **⚙ Admin Console**
+- **Dashboard tab**: stat cards show blocked navs and warnings today; recent event grid updates in real time
+- **Users tab**: select alice → enable clipboard → check Remote location → Save
+- **URL Whitelist tab**: add `https://reddit.com` for alice
+- **Audit Log tab**: filter by user or event type, export entire log as CSV
 
----
-
-### 3. URL Whitelist (Per-User)
-**Requirement:** Browser can only navigate to whitelisted URLs. SSL-only. Configurable per user through admin portal.
-
-**What was built:**
-- Every navigation request is intercepted in `NavigationStarting` before the page loads
-- URL is checked against the user's whitelist in `policy.json`
-- If blocked: navigation is cancelled and a custom block page is shown with the reason, the blocked URL, the user's identity, and a warning that the attempt was logged
-- SSL-only mode blocks all `http://` URLs regardless of whitelist status
-- Wildcard `*` allows all URLs (used for the admin account)
-- Domain-level matching: adding `google.com` covers `www.google.com`, `mail.google.com`, etc.
-- Admin can add and remove URLs per user in real time via the Admin Console
-
-**Demo:**
-- Login as `alice` → try to navigate to `reddit.com` → block page appears
-- Open Admin Console → URL Whitelist → add `reddit.com` for alice → alice logs back in → reddit works
-- Try `http://example.com` as alice → blocked by SSL-only policy
+**Step 4** — Close Admin Console → alice's status bar **immediately** updates (3-second polling timer hits the DB)
+- Logout → Login as alice from Remote (now permitted) → clipboard works, reddit loads
 
 ---
 
-### 4. Location-Based Access Control
-**Requirement:** Prevent access based on user's physical location. Configurable per user via admin portal.
+## Security Architecture
 
-**What was built:**
-- Location is selected at login (Office / Remote / Branch)
-- `PolicyEngine.AuthenticateUser()` checks whether the selected location is in the user's `AllowedLocations` list before granting a session
-- If the location is not permitted, login is denied with a specific error message
-- The denial is logged to the audit trail as `LOCATION_DENIED` with Critical severity
-- Admin can configure allowed locations per user via the Users tab in the Admin Console
+The browser enforces controls through four independent layers. Each layer is a separate enforcement point; a bypass of one does not automatically bypass the others.
 
-**Demo:**
-- Login as `alice` with location set to `Remote` → denied: "Remote is not an approved location for your account"
-- Same credentials with `Office` → login succeeds
-- Admin adds `Remote` to alice's allowed locations → alice can now login from Remote
+### Layer 1 — OS-Level (Windows Native API)
 
-> In production the location signal comes from PingFederate attributes (network segment, GPS, IP geolocation) rather than a dropdown. The enforcement logic is unchanged.
+**Screenshot / screen recording protection**
+`SetWindowDisplayAffinity(hWnd, WDA_MONITOR)` is applied at window creation and re-applied every time the window is activated. This causes the window's content to render as solid black in any screen capture tool, recording software, or Remote Desktop session. `WDA_MONITOR (0x01)` was deliberately chosen over `WDA_EXCLUDEFROMCAPTURE (0x11)` — the latter makes the window vanish entirely from captures, which looks like a crash rather than a security control.
 
----
+**Clipboard wipe on focus loss**
+`AddClipboardFormatListener` registers a `WM_CLIPBOARDUPDATE` message listener. Any time clipboard contents change while the window is focused, a 50ms-delayed wipe is triggered if the user's clipboard permission is currently blocked in the DB. Additionally, the `Deactivate` event (window loses focus) also triggers a live DB check and wipe. Both checks hit the DB directly so a mid-session admin change takes effect immediately.
 
-### 5. OS-Level Screenshot Protection
-**Requirement:** Defense in depth through multiple mitigation layers. Screenshot and screen recording blocked at OS level.
+**Low-level keyboard hook (Ctrl+S / Save-page blocking)**
+`SetWindowsHookEx(WH_KEYBOARD_LL)` installs a process-wide keyboard hook that fires before any application sees a keystroke. When Ctrl+S or Ctrl+Shift+S is detected while the Secure Browser window (or any child, including the WebView2 renderer) is the foreground window, the keypress is swallowed, a `SAVE_BLOCKED` audit event is written, and the status bar updates. This fires even when WebView2 has keyboard focus, where normal WinForms key handling cannot reach.
 
-**What was built:**
-- `SetWindowDisplayAffinity(hWnd, WDA_MONITOR)` is called immediately when the window handle is created
-- This instructs the Windows Desktop Window Manager (DWM) at the kernel level to render the browser window as a solid black rectangle in any capture
-- Covers: Print Screen key, Win+Shift+S, Snipping Tool, OBS Studio, any BitBlt-based screen recorder, Remote Desktop mirroring
-- Protection is re-applied every time the window regains focus (prevents DWM resets)
-- This is the same API used by Netflix and Disney+ to protect video content on Windows
+> **Honest caveat (from the code comments):** `WH_KEYBOARD_LL` runs in user mode. A process running as the same Windows user can bypass it via `SendInput()` (synthetic keystrokes skip all LL hooks by Windows design), by calling `UnhookWindowsHookEx()` with the hook handle, or by installing a competing hook earlier in the chain. True OS-level interception requires a kernel-mode filter driver (WDK). This hook provides best-effort protection against accidental or low-sophistication saves, not a security boundary against a determined same-privilege attacker.
 
-**Test it:** Open the browser, press Print Screen, paste into Paint — the browser area is solid black.
+**Session data wipe on logout**
+Before the window closes, `CleanupAndCloseAsync()` calls `CoreWebView2.Profile.ClearBrowsingDataAsync` to wipe: all DOM storage, cookies, disk cache, download history, browsing history, and cache storage. A 4-second timeout ensures the window closes even if the API hangs. This prevents session data from persisting to the next user.
 
----
+### Layer 2 — WebView2 Engine Settings
 
-### 6. Clipboard Protection (Two Layers)
-**Requirement:** Copy and paste configurable based on policy. Data must not leave the secure environment.
+Applied once at initialization, these disable browser features that could expose data or bypass controls:
 
-**What was built:**
+| Setting | Value | Effect |
+|---|---|---|
+| `AreDevToolsEnabled` | false | No F12 / DevTools |
+| `AreDefaultContextMenusEnabled` | false | No default context menu (replaced with filtered custom menu) |
+| `AreBrowserAcceleratorKeysEnabled` | false | Disables all built-in Ctrl+P, Ctrl+F, Ctrl+U, etc. |
+| `IsStatusBarEnabled` | false | No URL preview on hover |
+| `IsZoomControlEnabled` | false | No Ctrl+Scroll zoom |
+| `IsPasswordAutosaveEnabled` | false | No credential storage |
+| `IsGeneralAutofillEnabled` | false | No form autofill |
+| `IsSwipeNavigationEnabled` | false | No touch-swipe back/forward |
 
-**Layer 1 — JavaScript injection (browser engine level):**
-- On every page load a script is injected that intercepts `copy`, `cut`, and `paste` DOM events before Chromium can process them
-- `navigator.clipboard` API is overridden to a no-op
-- `document.execCommand('copy')` is intercepted and returns false
-- Ctrl+C, Ctrl+X, Ctrl+V keyboard shortcuts are blocked at the JS event level
-- Drag-and-drop exfiltration is blocked via `dragstart` event interception
-- When a copy attempt is intercepted, a message is posted back to the host app
+**New window suppression**: all `target="_blank"` links and popup requests (`NewWindowRequested`) are redirected into the same tab rather than opening a new browser window that would bypass URL whitelisting.
 
-**Layer 2 — OS clipboard wipe:**
-- When the browser window loses focus (user clicks away to another app), `EmptyClipboard()` is called immediately via Win32 API
-- Anything that may have leaked to the OS clipboard is wiped before it can be pasted elsewhere
-- The app listens for `WM_CLIPBOARDUPDATE` messages as an additional safety net
+### Layer 3 — JavaScript Injection (Per-Page Policy Enforcement)
 
-**If the user has clipboard allowed (e.g. bob):** only the Print Screen block and drag interception remain active. Copy/paste works normally within the browser.
+After every navigation completes, a JS block is injected into the page using `ExecuteScriptAsync`. It reads the user's current permissions from the DB at injection time and injects a matching policy. This layer acts as a renderer-process enforcement point that catches what the OS hook cannot (e.g., a page trying to call `document.execCommand('copy')` programmatically).
 
----
+**Always injected (regardless of permissions):**
+- `keydown` listener blocks `PrintScreen` at the renderer level (belt-and-suspenders alongside `WDA_MONITOR`)
+- `keydown` listener blocks Ctrl+S / Ctrl+Shift+S and posts a `save` message back to the host
 
-### 7. Context Menu Hardening
-**Requirement:** UI hardening — remove exfiltration vectors from the browser UI.
+**When clipboard is blocked:**
+- `copy`, `cut`, `paste` DOM events are cancelled with `stopImmediatePropagation`
+- `navigator.clipboard` API is overridden with a no-op stub (writes resolve instantly, reads return empty string)
+- Ctrl+C, Ctrl+X, Ctrl+V, Ctrl+A keyboard shortcuts are cancelled
+- `document.execCommand('copy')` and `document.execCommand('cut')` are overridden to return `false`
+- `dragstart` events are cancelled (drag-to-copy prevention)
 
-**What was built:**
-- `ContextMenuRequested` event intercepts every right-click menu before it is shown
-- Removed items: Copy, Cut, Paste, Copy Image, Copy Link, Copy Image URL, Save Image As, Save Link As, Save As, Print, View Source, Select All
-- DevTools (F12, Ctrl+Shift+I) is disabled via WebView2 settings
-- Browser accelerator keys (Ctrl+U view source, Ctrl+S save, etc.) are disabled
-- New window requests are redirected into the same browser tab (no pop-out windows)
+**When print is blocked:**
+- Ctrl+P is cancelled and a `print` message is posted to the host
+- `window.print()` is overridden to post the `print` message instead
 
----
+**When print is allowed:**
+- Since `AreBrowserAcceleratorKeysEnabled` is globally false, Ctrl+P is dead by default. The injection explicitly re-wires it by calling `window.print()` on the `keydown` event.
 
-### 8. Centralised Audit Logging
-**Requirement:** User-attributable monitoring including sessions, bypass attempts, and config changes. In production: Elasticsearch.
+Web messages (`copy`, `print`, `save`) from the JS layer are received by `OnWebMessageReceived`, which writes an audit event and updates the status bar.
 
-**What was built:**
-- `AuditLogger.cs` writes every security event as a JSON object to `data/audit.log`
-- Every event includes: timestamp, username, event type, details, severity, location
-- Events captured:
+### Layer 4 — Custom Context Menu Filtering
 
-| Event Type      | Severity | Trigger |
-|----------------|----------|---------|
-| LOGIN           | Info     | Successful authentication |
-| LOGOUT          | Info     | User clicked logout |
-| LOGIN_FAILED    | Critical | Wrong password |
-| LOCATION_DENIED | Critical | Login from non-approved location |
-| NAV_BLOCKED     | Warning  | URL not on whitelist or HTTP blocked |
-| COPY_BLOCKED    | Warning  | Clipboard intercept detected |
-| SCREENSHOT      | Warning  | Window protection applied at startup |
-| CONFIG_CHANGE   | Critical | Admin modified any policy setting |
+`ContextMenuRequested` fires before any context menu is shown. Items are filtered live against the DB:
 
-- The audit log is append-only and never modified by the app
-- Status bar flashes a notification when a copy block is logged in real time
-
-> In production `AuditLogger.Log()` makes an HTTP POST to an Elasticsearch ingest endpoint instead of appending to a file. The call signature and event schema are unchanged.
+- **Always removed**: `saveimageas`, `savelinkas`, `saveas`, `viewsource`
+- **Removed when clipboard is blocked**: `copy`, `cut`, `paste`, `copyimage`, `copyimageurl`, `copylink`, `selectall`
+- **Removed when print is blocked**: `print`
 
 ---
 
-### 9. Admin Console
-**Requirement:** Admin portal for managing users, permissions, URL whitelists, location rules, and viewing audit logs.
+## Policy Engine — Live DB Checks
 
-**What was built — four panels:**
+Every security-sensitive event queries PostgreSQL directly. No permission state is cached after login.
 
-**Dashboard:**
-- Live counts: total users, blocked events today, copy blocks today, logins today
-- Recent 50 security events table with colour-coded severity
-- One-click refresh
+| Event | Method called | DB query |
+|---|---|---|
+| Navigation starts | `IsUrlAllowed()` | url_whitelist + allowed_locations |
+| SSL-only check | `IsSSLOnly()` | permissions.ssl_only |
+| Clipboard wipe (blur / WM_CLIPBOARDUPDATE) | `IsClipboardAllowed()` | permissions.allow_clipboard |
+| Clipboard event (JS → host) | `IsClipboardAllowed()` | permissions.allow_clipboard |
+| Context menu opens | `IsClipboardAllowed()` + `IsPrintAllowed()` | permissions |
+| Print attempt (JS → host) | `IsPrintAllowed()` | permissions.allow_print |
+| JS injection after page load | `GetUserPermissions()` | permissions + url_whitelist |
+| Status bar refresh (3s timer) | `IsClipboardAllowed()` + `IsPrintAllowed()` + `IsSSLOnly()` | permissions |
 
-**Users / Permissions:**
-- Select any user and view their current permissions
-- Toggle: Allow Clipboard, Allow Print, SSL Only
-- Toggle: Allowed Locations (Office / Remote / Branch)
-- Save changes — written immediately to `policy.json`
-- Every change is logged as a `CONFIG_CHANGE` audit event with admin identity
-
-**URL Whitelist:**
-- Select user → see their current whitelist
-- Add new URLs — supports full URLs or bare domains
-- Remove URLs
-- Changes are live immediately
-
-**Audit Log:**
-- Full event history in a searchable table
-- Filter by user and by event type
-- Colour-coded rows: Critical = red, Warning = amber, Info = default
-- Export to CSV for compliance reporting or sharing with leadership
+**URL whitelist matching logic:**
+- `about:blank` is always allowed (used internally for block pages and session wipe)
+- `data:`, `about:` (other), and `edge:` URIs are always blocked
+- Wildcard `*` in the whitelist allows all URLs
+- Matching is host-based: `https://www.google.com` whitelists any URL whose host matches `google.com` or any subdomain
 
 ---
 
-## Architecture Overview
+## Admin Console
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                      Program.cs                             │
-│              Login → Browser → Logout loop                  │
-└────────────────────────┬────────────────────────────────────┘
-                         │
-          ┌──────────────▼──────────────┐
-          │         LoginForm.cs        │
-          │  Credentials + Location     │
-          │  PolicyEngine.Authenticate  │
-          └──────────────┬──────────────┘
-                         │ UserSession
-          ┌──────────────▼──────────────┐
-          │         MainForm.cs         │
-          │  WebView2 embedded browser  │
-          │  WDA_MONITOR (OS kernel)    │
-          │  NavigationStarting hook    │◄── PolicyEngine.IsUrlAllowed()
-          │  JS clipboard injection     │◄── UserPermissions.AllowClipboard
-          │  Context menu stripping     │
-          │  Clipboard wipe on blur     │
-          │  Admin Console button       │──► AdminForm.cs
-          └──────────────┬──────────────┘
-                         │
-          ┌──────────────▼──────────────┐
-          │       AuditLogger.cs        │
-          │  data/audit.log (JSON lines)│
-          │  → Elasticsearch in prod    │
-          └─────────────────────────────┘
+Accessible only to users with `Role = 'Admin'`. Opens as a modal dialog from the main browser window; closing it immediately triggers a permission display refresh.
 
-          ┌─────────────────────────────┐
-          │       PolicyEngine.cs       │
-          │  data/users.json            │
-          │  data/policy.json           │
-          │  → Policy API in prod       │
-          └─────────────────────────────┘
-```
+### Dashboard Tab
+- Stat cards: blocked navigations today, security warnings today, total audit events today
+- Recent events grid: last N events with timestamp, user, event type, details, severity
+- Refresh button for manual reload
+
+### Users Tab
+- List of all users in the system
+- Per-user permission checkboxes: Allow Clipboard, Allow Print, SSL-Only
+- Per-user location checkboxes: Office, Remote, Branch
+- Save button writes to PostgreSQL immediately; the change is visible to the running browser session within 3 seconds (next status bar poll)
+
+### URL Whitelist Tab
+- Per-user dropdown to select target user
+- List of currently whitelisted URLs for that user
+- Add / Remove URL controls
+- Changes take effect on the user's next navigation attempt (live DB check)
+
+### Audit Log Tab
+- Filter by user and/or event type
+- Event types: LOGIN, LOGOUT, LOGIN_FAILED, NAV_BLOCKED, COPY_BLOCKED, PRINT_BLOCKED, SCREENSHOT, SAVE_BLOCKED, CONFIG_CHANGE, LOCATION_DENIED
+- Results show: timestamp, username, event type, details, severity (colour-coded), location
+- **Export CSV**: exports the full unfiltered audit log to a timestamped `.csv` file
+
+---
+
+## Audit Events Reference
+
+| Event Type | Severity | Trigger |
+|---|---|---|
+| LOGIN | Info | Successful authentication |
+| LOGOUT | Info | User clicks Logout |
+| LOGIN_FAILED | Critical | Wrong password |
+| LOCATION_DENIED | Critical | Correct password but location not permitted |
+| NAV_BLOCKED | Warning | URL not in whitelist or SSL-only violation |
+| COPY_BLOCKED | Warning | Clipboard copy attempt when blocked |
+| PRINT_BLOCKED | Warning | Print attempt when blocked |
+| SAVE_BLOCKED | Warning | Ctrl+S / Ctrl+Shift+S intercepted |
+| SCREENSHOT | Warning | PrintScreen detected (JS layer) |
+| CONFIG_CHANGE | Critical | Admin changes any user's permissions or whitelist |
 
 ---
 
 ## File Structure
 
 ```
-SecureBrowserDemo/
-├── Program.cs          Entry point, login/logout loop
-├── Models.cs           UserAccount, UserPermissions, AuditEvent, UserSession
-├── PolicyEngine.cs     Authentication, permission evaluation, URL whitelist
-├── AuditLogger.cs      Security event logging
-├── LoginForm.cs        Authentication UI with location selection
-├── MainForm.cs         Browser UI with all OS-level and JS protections
-├── AdminForm.cs        Admin console — users, whitelist, audit log
-├── SecureBrowser.csproj
-├── app.manifest
-└── data/               (auto-created on first run)
-    ├── users.json      User accounts and password hashes
-    ├── policy.json     Per-user permissions and URL whitelists
-    └── audit.log       Security event log (JSON lines)
+SecureBrowser/
+├── docker-compose.yml      PostgreSQL container (port 5433)
+├── init.sql                Schema + seed data (auto-runs on first up)
+├── SecureBrowser.csproj    Project config (Npgsql + WebView2 packages)
+├── app.manifest            DPI / Windows compatibility settings
+├── Program.cs              Entry point: DB check → Login/Logout loop
+├── setup.bat               First-time: Docker + restore + build + run
+├── run.bat                 Subsequent launches
+├── README.md               This file
+│
+├── Models/
+│   └── Models.cs           UserAccount, UserPermissions, AuditEvent, UserSession
+│
+├── Data/
+│   ├── Db.cs               PostgreSQL connection helper (env var override)
+│   ├── PolicyEngine.cs     Auth, permissions, URL whitelist — all DB-backed, all live
+│   └── AuditLogger.cs      Audit event write + read + stats — all DB-backed
+│
+└── Forms/
+    ├── LoginForm.cs         Login UI: username, password, location selector
+    ├── MainForm.cs          Browser window: WebView2 + all four enforcement layers
+    └── AdminForm.cs         Admin console: dashboard, users, whitelist, audit + CSV export
 ```
 
 ---
 
-## What This Demo Does Not Include (Production Gap)
+## Database Schema
 
-| Requirement | Demo Approach | Production Approach |
-|---|---|---|
-| PingFederate / PKI auth | Local JSON user store | OIDC/SAML redirect to PingFederate |
-| Centralised policy service | Local `policy.json` file | REST API backed by database |
-| Elasticsearch audit | Local `audit.log` file | HTTP POST to Elasticsearch ingest |
-| Machine certificate verification | Not implemented | WebView2 client cert + PKI validation |
-| IP / DNS filtering | URL whitelist at navigation layer | DNS resolver or proxy-level filtering |
-| Mojo IPC clipboard stubbing | JS injection + OS clipboard wipe | C++ patch in `clipboard_host_impl.cc` |
-| Chromium source-level build | WebView2 runtime (pre-built) | Custom Chromium fork with patch set |
-| Regression test suite | Manual testing | Playwright E2E + Jenkins CI/CD |
-| Multi-app clipboard policy | Single browser context | Per-app labeled clipboard buffer |
+```sql
+users              id, username, password_hash, display_name, role, department, is_active, created_at
+permissions        username (FK), allow_clipboard, allow_print, ssl_only, updated_at
+url_whitelist      username (FK), url                          -- many rows per user
+allowed_locations  username (FK), location                     -- many rows per user
+audit_log          id, timestamp, username, event_type, details, severity, location
+```
 
----
+Indexes on `audit_log(timestamp DESC)`, `audit_log(username)`, `audit_log(event_type)` for fast admin console queries.
 
-## Security Controls Summary
-
-| Control | Method | Layer |
-|---|---|---|
-| Screenshot blocked | `SetWindowDisplayAffinity(WDA_MONITOR)` | OS / DWM kernel |
-| Screen recording blocked | Same WDA call — covers OBS, Game Bar, Snipping Tool | OS / DWM kernel |
-| Clipboard blocked (copy) | JS `copy` event interception + `execCommand` override | Browser engine |
-| Clipboard blocked (paste out) | `EmptyClipboard()` on window blur | OS Win32 |
-| Clipboard API blocked | `navigator.clipboard` overridden to no-op | Browser engine |
-| Drag-drop exfiltration blocked | JS `dragstart` interception | Browser engine |
-| URL whitelist enforced | `NavigationStarting` cancellation | Browser navigation layer |
-| SSL-only enforced | HTTP URL detection in `NavigationStarting` | Browser navigation layer |
-| DevTools blocked | `AreDevToolsEnabled = false` | WebView2 settings |
-| Context menu stripped | `ContextMenuRequested` event handler | Browser UI layer |
-| Location-based login denied | `PolicyEngine.AuthenticateUser()` check | Application layer |
-| All events logged | `AuditLogger` JSON append | Application layer |
+Passwords are stored as SHA-256 lowercase hex. The DB seed uses PostgreSQL's native `sha256()` function to hash them at init time.
 
 ---
 
-## How to Present This to Leadership
+## Database Connection
 
-1. **Open the app** — login screen appears, show the credential box
-2. **Login as alice (Office)** — browser opens, point to the status bar showing blocked clipboard and SSL-only
-3. **Try to screenshot** — Print Screen produces a black box
-4. **Try to copy text** — Ctrl+C does nothing, status bar flashes "Copy blocked — Logged"
-5. **Try reddit.com** — custom block page appears, shows user identity and logs the attempt
-6. **Try http://example.com** — blocked by SSL-only policy
-7. **Logout → Login as alice (Remote)** — access denied, location policy demonstrated
-8. **Login as admin** — Admin Console button appears
-9. **Open Admin Console → Dashboard** — show alice's blocked attempts with timestamps
-10. **Users tab** — enable clipboard for alice, save
-11. **URL Whitelist tab** — add reddit.com for alice
-12. **Audit Log tab** — filter by alice, show full event history, export CSV
-13. **Logout → Login as alice** — clipboard now works, reddit is now accessible
-14. **Show the data folder** — `users.json`, `policy.json`, `audit.log` — explain these are local file stand-ins for enterprise services
+Default (matches the Docker container):
+```
+Host=localhost;Port=5433;Database=securebrowser;Username=sbadmin;Password=SBDemo2024!
+```
+
+Override with an environment variable before running:
+```
+set DB_CONN=Host=myserver;Port=5432;Database=securebrowser;Username=myuser;Password=mypass
+dotnet run -c Release
+```
 
 ---
 
-*Built as a demonstration prototype. All enterprise integration points (PingFederate, Elasticsearch, Policy API) are abstracted behind single-responsibility classes designed for straightforward replacement in a production implementation.*
+## What This Maps To (Enterprise)
+
+| Demo Component | Enterprise Equivalent |
+|---|---|
+| PostgreSQL + Docker | RDS / Aurora / managed DB service |
+| LoginForm + location dropdown | PingFederate OIDC / SAML SSO |
+| PolicyEngine (live Npgsql queries) | Policy service REST API / OPA |
+| AuditLogger (Npgsql) | Elasticsearch / Splunk audit cluster |
+| AdminForm (WinForms) | React-based web admin portal |
+| `SetWindowDisplayAffinity` | Same — OS kernel-level, no equivalent workaround |
+| URL whitelist in NavigationStarting | DNS/proxy filtering layer (e.g. Zscaler, Netskope) |
+| Per-user live DB permissions | Per-user per-app policy engine |
+| JS injection for clipboard/print | Same pattern — renderer-process policy enforcement |
+| WH_KEYBOARD_LL hook | Kernel-mode filter driver for true interception |
+| Session data wipe on logout | Same — OIDC token revocation + browser profile isolation |
+
+---
+
+## Troubleshooting
+
+**"Cannot connect to database"**
+→ Run `docker-compose up -d` and wait 5 seconds for PostgreSQL to finish initializing.
+
+**"WebView2 Runtime required"**
+→ Download from https://developer.microsoft.com/microsoft-edge/webview2/
+
+**Port 5433 already in use**
+→ Edit `docker-compose.yml`, change `5433:5432` to a free port, and update the connection string in `Db.cs` to match.
+
+**Admin changes not appearing immediately**
+→ The status bar polls the DB every 3 seconds. Changes also take effect the moment the user triggers a security event (navigation, clipboard, etc.). There is no manual refresh needed for policy enforcement — only the displayed status badge has the 3-second lag.
+
+**Reset all data to factory defaults**
+→ `docker-compose down -v` then `docker-compose up -d` — this destroys and recreates the volume, re-running `init.sql` from scratch.

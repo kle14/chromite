@@ -1,0 +1,19 @@
+version: "3.8"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: securebrowser-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: securebrowser
+      POSTGRES_USER: sbadmin
+      POSTGRES_PASSWORD: SBDemo2024!
+    ports:
+      - "5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/01-init.sql
+
+volumes:
+  pgdata:
